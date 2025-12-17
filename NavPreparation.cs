@@ -1,8 +1,7 @@
-﻿class GarminUpdater
+﻿class NavPreparation
 {
     // Конфигурация
     private const string TargetDriveKeyword = "Garmin";
-    private const string TargetSubfolder = "Garmin";
     private static readonly string[] FoldersToCopy = ["BirdsEye", "CustomMaps", "GPX"];
     private const string BackupFolderName = "nav_backup";
 
@@ -48,11 +47,27 @@
                 return;
             }
 
-            string targetRoot = Path.Combine(targetDrive.RootDirectory.FullName, TargetSubfolder);
             Console.WriteLine($"\nНайден диск: {targetDrive.Name} - {targetDrive.VolumeLabel}");
 
+            // Поиск папки Garmin на диске
+            string targetRoot = FindGarminFolder(targetDrive);
+            if (targetRoot == null)
+            {
+                Console.WriteLine("Папка 'Garmin' не найдена на диске.");
+                return;
+            }
+
+            Console.WriteLine($"Целевая папка: {targetRoot}");
+
             // Создание резервной копии и очистка
-            CreateBackupAndClean(targetRoot);
+            bool backupCreated = CreateBackupAndClean(targetRoot);
+
+            // Если при создании бекапа произошла ошибка, останавливаем выполнение
+            if (!backupCreated)
+            {
+                Console.WriteLine("\nОшибка при создании резервной копии. Операция отменена.");
+                return;
+            }
 
             // Копирование новых файлов
             CopyNewFiles(scriptDirectory, targetRoot);
@@ -63,7 +78,6 @@
         catch (Exception ex)
         {
             Console.WriteLine($"\nКритическая ошибка: {ex.Message}");
-            Console.WriteLine($"Детали: {ex.StackTrace}");
         }
     }
 
@@ -73,6 +87,25 @@
             .FirstOrDefault(d => d.IsReady &&
                                !string.IsNullOrEmpty(d.VolumeLabel) &&
                                d.VolumeLabel.Contains(TargetDriveKeyword, StringComparison.OrdinalIgnoreCase));
+    }
+
+    static string FindGarminFolder(DriveInfo drive)
+    {
+        string[] possiblePaths = [
+            Path.Combine(drive.RootDirectory.FullName, "Garmin"),
+            Path.Combine(drive.RootDirectory.FullName, "inner", "Garmin")
+        ];
+
+        // Проверяем стандартные пути
+        foreach (var path in possiblePaths)
+        {
+            if (Directory.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        return null;
     }
 
     static void ShowConnectedDrives()
@@ -85,30 +118,39 @@
         }
     }
 
-    static void CreateBackupAndClean(string targetRoot)
+    static bool CreateBackupAndClean(string targetRoot)
     {
-        // Находим существующие папки для бекапа
-        var existingFolders = FoldersToCopy
-            .Where(folderName => Directory.Exists(Path.Combine(targetRoot, folderName)))
-            .ToList();
-
-        if (existingFolders.Count == 0)
+        try
         {
-            Console.WriteLine("\nСуществующие папки для резервного копирования не найдены.");
-            Console.WriteLine("Пропуск этапа резервного копирования и очистки.");
-            return;
+            // Находим существующие папки для бекапа
+            var existingFolders = FoldersToCopy
+                .Where(folderName => Directory.Exists(Path.Combine(targetRoot, folderName)))
+                .ToList();
+
+            // Создаем структуру для бекапа
+            string backupPath = CreateBackupStructure();
+            Console.WriteLine($"\nСоздание резервной копии в: {backupPath}");
+
+            // Создаем резервные копии
+            bool backupSuccess = CreateBackups(targetRoot, backupPath, existingFolders);
+
+            // Если при создании бекапа произошла ошибка, возвращаем false
+            if (!backupSuccess)
+            {
+                return false;
+            }
+
+            // Очищаем папки
+            Console.WriteLine("\nОчистка файлов на диске...");
+            CleanTargetFolders(targetRoot);
+
+            return true;
         }
-
-        // Создаем структуру для бекапа
-        string backupPath = CreateBackupStructure();
-        Console.WriteLine($"\nСоздание резервной копии в: {backupPath}");
-
-        // Создаем резервные копии
-        CreateBackups(targetRoot, backupPath, existingFolders);
-
-        // Очищаем папки
-        Console.WriteLine("\nОчистка файлов на диске...");
-        CleanTargetFolders(targetRoot);
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\nОшибка при создании резервной копии: {ex.Message}");
+            return false;
+        }
     }
 
     static string CreateBackupStructure()
@@ -127,9 +169,11 @@
         return timeFolderPath;
     }
 
-    static void CreateBackups(string sourceRoot, string backupRoot, List<string> folders)
+    static bool CreateBackups(string sourceRoot, string backupRoot, List<string> folders)
     {
         Console.WriteLine($"Копируется {folders.Count} папок в резервную копию:");
+
+        bool allBackupsSuccessful = true;
 
         foreach (string folderName in folders)
         {
@@ -140,14 +184,19 @@
 
             try
             {
-                CopyDirectory(sourcePath, backupPath, true);
+                // Для бекапа используем строгий режим копирования
+                CopyDirectoryForBackup(sourcePath, backupPath, true);
                 Console.WriteLine("УСПЕХ");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Ошибка: {ex.Message}");
+                allBackupsSuccessful = false;
+                break; // Прерываем цикл при первой же ошибке
             }
         }
+
+        return allBackupsSuccessful;
     }
 
     static void CleanTargetFolders(string targetRoot)
@@ -198,6 +247,44 @@
         }
     }
 
+    // Строгий метод копирования для бекапа (прерывается при ошибке)
+    static void CopyDirectoryForBackup(string sourceDir, string destinationDir, bool recursive)
+    {
+        var dir = new DirectoryInfo(sourceDir);
+
+        if (!dir.Exists)
+            throw new DirectoryNotFoundException($"Директория не найдена: {sourceDir}");
+
+        // Создаем целевую директорию для бекапа, если не существует
+        Directory.CreateDirectory(destinationDir);
+
+        // Копируем файлы
+        foreach (var file in dir.GetFiles())
+        {
+            try
+            {
+                string targetFilePath = Path.Combine(destinationDir, file.Name);
+                file.CopyTo(targetFilePath, true);
+            }
+            catch (Exception ex)
+            {
+                // При ошибке копирования файла выбрасываем исключение
+                throw new IOException($"Ошибка при копировании файла {file.Name}: {ex.Message}", ex);
+            }
+        }
+
+        // Рекурсивно копируем поддиректории
+        if (recursive)
+        {
+            foreach (var subDir in dir.GetDirectories())
+            {
+                string newDestinationDir = Path.Combine(destinationDir, subDir.Name);
+                CopyDirectoryForBackup(subDir.FullName, newDestinationDir, true);
+            }
+        }
+    }
+
+    // Нестрогий метод копирования для обновления (продолжает при ошибках)
     static void CopyDirectory(string sourceDir, string destinationDir, bool recursive)
     {
         var dir = new DirectoryInfo(sourceDir);
@@ -221,16 +308,6 @@
             catch (UnauthorizedAccessException)
             {
                 Console.WriteLine($"    Нет доступа к файлу: {file.Name}");
-            }
-        }
-
-        // Рекурсивно копируем поддиректории
-        if (recursive)
-        {
-            foreach (var subDir in dir.GetDirectories())
-            {
-                string newDestinationDir = Path.Combine(destinationDir, subDir.Name);
-                CopyDirectory(subDir.FullName, newDestinationDir, true);
             }
         }
     }
@@ -294,7 +371,7 @@
     {
         try
         {
-            Console.WriteLine($"    Удаляем файл: {Path.GetFullPath(filePath)}");
+            Console.WriteLine($"    Удаляем файл: {Path.GetFileName(filePath)}");
             File.Delete(filePath);
         }
         catch (UnauthorizedAccessException)
